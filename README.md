@@ -1,8 +1,7 @@
 # ArduinoDIP16RamTest
 Arduino Ram tester for 256 kilobit or less dram chip DIP16
 
-I wrote this to locate any bad ram chip in my Tandy 1000A ram expansion board.  The Tandy had MT1257-20 chips, 16 of them. They are 256kbit x 1 DIP16 dram.  I also tested Goldstar GM71C256-10 a modern CMOS version of DIP16 chips.
-
+I wrote this to locate any bad ram chip in my Tandy 1000A ram expansion board.  The Tandy had MT1257-20 chips, 16 of them. They are 256kbit x 1 DIP16 dram.  I also tested Goldstar GM71C256-10 a modern CMOS version of DIP16 chips. According to documentation I've perused, most of this era DRAM chips had a maximum 4ms refresh cycle to garuntee data.  In testing, I've gotten almost a minute on the CMOS based ram before data errors show up! This seems to be a lot closer to the 4ms on the MT1257-20 which I believe is NMOS.
 
 ## Description
 * Designed to test 32,64,128,256kb x 1 bit DIP16 Dram chips.
