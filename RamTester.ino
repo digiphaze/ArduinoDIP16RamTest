@@ -1,18 +1,24 @@
-#define WORDS 262144      // <--- Change me
-#define BITS  4           // <--- Change to number of data bits/wordsize(Max 8)
-#define SINGLE_IO 1       // 1 If data in and out are same pins
-#define CHIP_OE 1         // 1 if DRAM has an output enable pin
-#define REFRESHCYCLE 6    // In Miliseconds(ms) takes aprox 1ms to refresh 512 rows,
-                          //  if max 8ms refresh then set the cycle to kick off 1ms less than max to ensure integrity
-#define ARDUINO MEGA2560  // Set to board type, currently only MEGA2560
-#define RANDOMSEED 5487   // Change for different starting values
-#define BAUDRATE 115200
+#define WORDS 262144        // <--- Change me
+#define BITS  4             // <--- Change to number of data bits/wordsize(Max 8)
+#define SINGLE_IO 1         // 1 If data in and out are same pins
+#define CHIP_OE 1           // 1 if DRAM has an output enable pin
+#define REFRESHCYCLE 6      // In Miliseconds(ms) takes aprox 1ms to refresh 512 rows,
+                            //  if max 8ms refresh then set the cycle to kick off 1ms less than max to ensure integrity
+#define ARDUINO MEGA2560    // Set to board type, currently only MEGA2560
 
-#define MAX_ROWS (sqrt(WORDS))
-#define MAX_COLS (sqrt(WORDS))
-#define BYTES_PER_ROW ((MAX_COLS * BITS) / 8)
-#define COLS_PER_BYTE (8 / BITS)
-#define BITSZMASK ((1 << BITS) - 1)
+// TEST Parameters
+#define STARTUP_DELAY 2000  // (ms) 2s default
+#define RANDOMSEED 5487     // Change for different starting values
+#define BAUDRATE 115200
+#define PASSES 2            // How many times to run test
+#define WRITE_TO_READ 2000  // How long to wait after writing a row (ms). Tests cell retention
+#define DEBUG 1             // 0 for less console outut
+
+#define MAX_ROWS (uint16_t)(sqrt(WORDS))
+#define MAX_COLS (uint16_t)(sqrt(WORDS))
+#define BYTES_PER_ROW (uint16_t)((MAX_COLS * BITS) / 8)
+#define COLS_PER_BYTE (uint8_t)(8 / BITS)
+#define BITSZMASK (uint8_t)((1 << BITS) - 1)
 
 /* Wire RAM to MEGA2560 as follows
  ** LSB of Address/Data pins must follow order of Mega pins listed below
@@ -150,7 +156,7 @@ static inline void fast_p_mode_read_c(uint16_t row_addr, uint16_t bytes, uint8_t
   uint16_t col_addr = 0;
   uint8_t c;
   
-  for (uint8_t b = 0; b < bytes; b++) {
+  for (uint16_t b = 0; b < bytes; b++) {
     data[b] = 0; // Zero out destination memory for |= operation
     for (c = 0; c < COLS_PER_BYTE; c++) {
       LATCH(col_addr);
@@ -184,7 +190,7 @@ static inline void fast_p_mode_write_c(uint16_t row_addr, uint16_t bytes, uint8_
   uint16_t col_addr = 0;
   uint8_t c;
   
-  for (uint8_t b = 0; b < bytes; b++) {
+  for (uint16_t b = 0; b < bytes; b++) {
     IO_DATA = 0x00;
     for (c = 0; c < COLS_PER_BYTE; c++) {
       LATCH(col_addr);
@@ -235,13 +241,40 @@ void setup() {
   Serial.begin(BAUDRATE);
   Serial.setTimeout(1000);
   Serial.flush();
-  delay(2000);
+  delay(STARTUP_DELAY);
   while (!Serial) continue;
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
+  uint16_t row = 0;
+  uint8_t fromRamStr[BYTES_PER_ROW];
+  uint8_t randomStr[BYTES_PER_ROW];
+  char diagStr[150];
 
+  for (uint8_t pass = 1; pass < PASSES; pass++) {
+    sprintf(diagStr, "Starting Pass (%d/%d) DataBits(%d), Rows(%d), Cols(%d)----",pass, PASSES, BITS, MAX_ROWS, MAX_COLS);
+    Serial.println(diagStr);
+    for (uint16_t row = 0; row < MAX_ROWS; row++) {
+      // Generate row random data
+      for (uint16_t byteW = 0; byteW < BYTES_PER_ROW;  byteW++) {
+        randomStr[byteW] = random(256);
+      }
+      #if DEBUG == 1
+        sprintf(diagStr," W -> Row[%d] -- 0x%X", (char *)randomStr);
+        Serial.println(diagStr);
+      #endif
+      fast_p_mode_write_c(row, BYTES_PER_ROW, randomStr);
+      #if WRITE_TO_READ > 0
+        delay(WRITE_TO_READ);
+      #endif
+      fast_p_mode_read_c(row, BYTES_PER_ROW, fromRamStr);
+      #if DEBUG == 1
+        sprintf(diagStr, " R <- Row[%d] -- 0x%X", (char *)fromRamStr);
+        Serial.println(diagStr);
+      #endif
+    }
+  }
 }
 
 ISR(TIMER1_COMPA_vect) {
