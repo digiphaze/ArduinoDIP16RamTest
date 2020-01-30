@@ -1,225 +1,269 @@
-/*
-  Most early 256Kilobit DIP-16 ram chips had max 4ms refresh cycles to account for worst possible capacitor cell.
-  This program will set an interrupt timer for x miliseconds refresh.
+#define WORDS 262144      // <--- Change me
+#define BITS  4           // <--- Change to number of data bits/wordsize(Max 8)
+#define SINGLE_IO 1       // 1 If data in and out are same pins
+#define CHIP_OE 1         // 1 if DRAM has an output enable pin
+#define REFRESHCYCLE 6    // In Miliseconds(ms) takes aprox 1ms to refresh 512 rows,
+                          //  if max 8ms refresh then set the cycle to kick off 1ms less than max to ensure integrity
+#define ARDUINO MEGA2560  // Set to board type, currently only MEGA2560
+#define RANDOMSEED 5487   // Change for different starting values
+#define BAUDRATE 115200
 
-  Little-Endian right most bit of byte will be written to first memory location
+#define MAX_ROWS (sqrt(WORDS))
+#define MAX_COLS (sqrt(WORDS))
+#define BYTES_PER_ROW ((MAX_COLS * BITS) / 8)
+#define COLS_PER_BYTE (8 / BITS)
+#define BITSZMASK ((1 << BITS) - 1)
 
-DIP16 pinout, Mega2560 Pin, Mega2560 Port Register
-A0 22 PA0
-A1 23 PA1
-A2 24 PA2
-A3 25 PA3
-A4 26 PA4
-A5 27 PA5
-A6 28 PA6
-A7 29 PA7
-A8 37 PC0
-
-WE  49 PL0
-CAS 48 PL1
-RAS 47 PL2
-DI  46 PL3
-DO  45 PL4
+/* Wire RAM to MEGA2560 as follows
+ ** LSB of Address/Data pins must follow order of Mega pins listed below
+ ** ex.  A0 = D22, A1 = D23,  A8 = D37, A9 = D36 ... etc
+ --------------------
+  RAM         MEGA2560
+  Addr(0-7)   A0-7
+  Addr(8-16)  A8-16
+  IO(0-8)     D22-29  >> If separate Data in/out pins, wire Data in here
+  DO(0-8)     D37-30  >> Only if Data out pins are separate from in
+  RAS         D42
+  CAS         D43
+  WE          D44
+  OE          D45
 */
+#if ARDUINO == MEGA2560
+  #define ARDUINO_SPEED 16        // Speed in MHZ
+  #define ADDRESS_LSB PORTF
+  #define ADDRESS_LSB_DDR DDRF
+  #define ADDRESS_MSB PORTK
+  #define ADDRESS_MSB_DDR DDRK
+  #define IO_DATA PORTA
+  #define IO_DIR DDRA
+  #define IO_VAL PINC
+  #define DO_DIR DDRC
+  #define DO_VAL PINC
+  #define CTRL_PORT PORTL
+  #define CTRL_DDR DDRL
+  #define RAS_MASK 0x01
+  #define CAS_MASK 0x02
+  #define WE_MASK 0x03
+  #define OE_MASK 0x04
+#endif
 
-// PORTL bit positions
-#define WE  0
-#define CAS 1
-#define RAS 2
-#define DI  3
-#define DO  4
+#define RAM_RAS_INACTIVE CTRL_PORT |= RAS_MASK
+#define RAM_RAS_ACTIVE CTRL_PORT &= ~(RAS_MASK)
+#define RAM_CAS_INACTIVE CTRL_PORT |= CAS_MASK
+#define RAM_CAS_ACTIVE CTRL_PORT &= ~(CAS_MASK)
+#define RAM_WE_DISABLE CTRL_PORT |= WE_MASK
+#define RAM_WE_ENABLE CTRL_PORT &= ~(WE_MASK)
+#define RAM_OE_DISABLE CTRL_PORT |= OE_MASK
+#define RAM_OE_ENABLE CTRL_PORT &= ~(OE_MASK)
+#define ARDUINO_IO_READ IO_DIR &= 0x00
+#define ARDUINO_IO_WRITE IO_DIR |= 0xFF
 
-#define REFRESH 2 // Refresh interval in miliseconds(ms)
-#define PASSES 3  // Number of times to run through all rows
-#define DEBUG 0  // 0 - Minimal, 1 - Show row data
+#define RAM_CYCLE_SETUP CTRL_PORT &= (0xF0 | (RAS_MASK | CAS_MASK | WE_MASK | OE_MASK))
 
-#define ADDRBITS 9  // A0-A8 = 9 bits
-#define RANDOMSEED 5487  // Change me between runs
+#if SINGLE_IO == 1
+  #define ARDUINO_READ IO_VAL
+#else
+  #define ARDUINO_READ DO_VAL
+#endif
 
-// Fast page mode early write cycle (8bit data, 9bit Row Addr, 9bit Col Addr)
-void writeByte(byte data, uint16_t row, uint16_t col) {
-  noInterrupts(); // Don't interrupt for refresh while writting
+#define LATCH(addr) ADDRESS_LSB = (addr & 0x00FF); ADDRESS_MSB = (addr & 0xFF00)
 
-  // Preset CAS/RAS
-  PORTL |= (1 << RAS);  // RAS inactive
-  PORTL |= (1 << CAS);  // CAS inactive
-
-  // Set row Address
-  PORTA = (row & 0x00FF); // Grab the 8 LSB
-  PORTC = (row & 0x0100) >> 8; // 9th addr bit
-
-  // Set write conditions
-  PORTL &= ~(1 << RAS); // RAS active
-  PORTL &= ~(1 << WE);  // WE active
-
-  for(uint8_t colAddr = 0; colAddr < 8; colAddr++) {
-    digitalWrite(46, bitRead(data, colAddr)); // Set DI value
-    PORTA = (col+colAddr);       // Set COL address
-    PORTC = (col & 0x0100) >> 8; // 9th addr bit
-    
-    // Latch data
-    PORTL &= ~(1 << CAS);   // CAS active
-    PORTL |= (1 << CAS);    // CAS inactive
-  }
-
-  PORTL |= (1 << WE);   // WE inactive
-  PORTL |= (1 << RAS);  // RAS inactive
-  interrupts();
-}
-
-// Fast page mode read cycle (9bit Row addr, 9bit Col addr)
-byte readByte(uint16_t row, uint16_t col) {
-  byte dO = 0;
-
-  noInterrupts(); // Dont interrupt while reading
-
-  // Preset CAS/RAS
-  PORTL |= (1 << RAS);  // RAS inactive
-  PORTL |= (1 << CAS);  // CAS inactive
-
-  // Set row Address
-  PORTA = (row & 0x00FF); // Grab the 8 LSB
-  PORTC = (row & 0x0100) >> 8; // 9th addr bit
-
-  // Set read conditions
-  PORTL &= ~(1 << RAS); // RAS active
-  PORTL |= (1 << WE);   // WE inactive
-
-  for(uint8_t colAddr = 0; colAddr < 8; colAddr++) {
-    PORTA = (col+colAddr);  // Set col Address
-    PORTC = (col & 0x0100) >> 8; // 9th addr bit
-
-    // Trigger CAS
-    PORTL &= ~(1 << CAS);   // CAS active
-    PORTL |= (1 << CAS);    // CAS inactive
-
-    bitWrite(dO, colAddr, digitalRead(45));
-  }
-
-  PORTL |= (1 << RAS);  // RAS inactive
-  interrupts();
+// Read cycle
+static inline void read_c(uint16_t row_addr, uint16_t col_addr, uint8_t *data) {
+  noInterrupts();
+  RAM_CYCLE_SETUP;
+  ARDUINO_IO_READ;
   
-  return dO;
+  // Latch row (16mhz Arduino executes about 1 inst per tick (62.5ns)
+  //  for an aprox 313 ns tASR (Row address setup time)
+  LATCH(row_addr);
+  RAM_RAS_ACTIVE;
+
+  // Latch col (Most dram is 20ns tCAC (Access time from CAS))
+  //  At 62.5ns per tick for 16mhz, we should be fine foregoing a delay
+  LATCH(col_addr);
+  RAM_CAS_ACTIVE;
+
+  // Most dram is 20ns tOAC (Access time from OE)
+  //  At 62.5ns per tick for 16mhz, we should be fine foregoing a delay
+  #if CHIP_OE
+    RAM_OE_ENABLE;
+  #endif
+  *data = ARDUINO_READ;
+  #if CHIP_OE
+    RAM_OE_DISABLE;
+  #endif
+  
+  RAM_CAS_INACTIVE;
+  RAM_RAS_INACTIVE;
+  RAM_RAS_ACTIVE;
+  interrupts();
 }
 
-byte ram[65];
-byte fake[65];
-uint16_t maxrc = 0;
-uint8_t pass = 1;
+// Write cycle (We aren't fast enough to qualify for Early write cycle, this more emulates Delayed Write Cycle)
+static inline void write_c(uint16_t row_addr, uint16_t col_addr, uint8_t *data) {
+  noInterrupts();
+  RAM_CYCLE_SETUP;
+  ARDUINO_IO_WRITE;
+  
+  // Latch row
+  LATCH(row_addr);
+  RAM_RAS_ACTIVE;
+
+  // Set outbound data
+  IO_DATA = data;
+  RAM_WE_ENABLE;
+
+  // Latch col
+  LATCH(col_addr);
+  RAM_CAS_ACTIVE;
+
+  // Latch DATA
+  RAM_CAS_INACTIVE;
+  RAM_RAS_INACTIVE;
+  RAM_RAS_ACTIVE;
+  interrupts();
+}
+
+// Arduino isn't fast enough to justify implementing this cycle
+// Placeholder for now
+// static inline void read_modify_c() {}
+// static inline void fast_p_mode_read_modify_c() {}
+
+// Fast page mode read cycle
+// Arduino Mega2560 has 8K variable memory.  A 262,144x4 bit DRAM will be 2KB of RAM usage per row
+// There may not be enough ram on smaller Arduinos for a full row in one read cycle
+// DON'T EXCEED BYTES_PER_ROW(MAX_COLS * BITS) / 8)
+static inline void fast_p_mode_read_c(uint16_t row_addr, uint16_t bytes, uint8_t *data) {
+  noInterrupts();
+  RAM_CYCLE_SETUP;
+  ARDUINO_IO_READ;
+
+  // Latch row
+  LATCH(row_addr);
+  RAM_RAS_ACTIVE;
+
+  #if CHIP_OE
+    RAM_OE_ENABLE;
+  #endif
+
+  uint16_t col_addr = 0;
+  uint8_t c;
+  
+  for (uint8_t b = 0; b < bytes; b++) {
+    data[b] = 0; // Zero out destination memory for |= operation
+    for (c = 0; c < COLS_PER_BYTE; c++) {
+      LATCH(col_addr);
+      RAM_CAS_ACTIVE;
+      // Unsure how many ticks will be between RAM_CAS_ENABLE and the PIN registers latching the bus value
+      // Adding a single NOP to give a clock tick to latch PIN register
+      asm("nop");
+      data[b] = (data[b] & 0xFF) | (ARDUINO_READ << (c*BITS));
+      RAM_CAS_INACTIVE;
+      col_addr++;
+    }
+  }
+
+  #if CHIP_OE
+    RAM_OE_DISABLE;
+  #endif
+
+  RAM_RAS_INACTIVE;
+  RAM_RAS_ACTIVE;
+}
+
+static inline void fast_p_mode_write_c(uint16_t row_addr, uint16_t bytes, uint8_t *data) {
+  noInterrupts();
+  RAM_CYCLE_SETUP;
+  ARDUINO_IO_WRITE;
+
+  // Latch row
+  LATCH(row_addr);
+  RAM_RAS_ACTIVE;
+
+  uint16_t col_addr = 0;
+  uint8_t c;
+  
+  for (uint8_t b = 0; b < bytes; b++) {
+    IO_DATA = 0x00;
+    for (c = 0; c < COLS_PER_BYTE; c++) {
+      LATCH(col_addr);
+      RAM_CAS_ACTIVE;
+      // Unsure how many ticks will be between RAM_CAS_ENABLE and the PIN registers latching the bus value
+      // Adding a single NOP to give a clock tick to latch PIN register
+      asm("nop");
+      IO_DATA = (data[b] & (BITSZMASK << (BITS * c))) >> (BITS * c);
+      RAM_WE_ENABLE;
+      RAM_CAS_INACTIVE;
+      RAM_WE_DISABLE;
+      col_addr++;
+    }
+  }
+
+  RAM_RAS_INACTIVE;
+  RAM_RAS_ACTIVE;
+}
+
+static inline void cas_before_ras_refresh_c() {}
+static inline void hidden_refresh_read_c() {}
+static inline void hidden_refresh_write_c() {}
 
 void setup() {
-  // Address lines 0-8 output
-  DDRA |= 0xFF;
-  DDRC |= 0xFF;
+  // All address lines set as OUTPUT pins
+  ADDRESS_LSB_DDR = 0xFF;
+  ADDRESS_MSB_DDR = 0xFF;
 
-  // Data and CAS/RAS lines
-  DDRL |= B00001111;
+  DO_DIR = 0x00;  // For split Din and Dout on ram, force this to always be input
+  
+  // Initialize at 0x00;
+  ADDRESS_LSB = 0x00;
+  ADDRESS_MSB = 0x00;
 
-  // CAS, RAS and WE are active low
-  PORTL |= B00000111;
-
+  // Interrupt Setup (16,000 ticks per mhz)
+  // 1ms per 16,000 ticks.
   noInterrupts();
   TCCR1A = 0;
   TCCR1B = 0;
-
-  // 2ms Timer trigger. Most ram is 4ms minimum refresh
-  OCR1A = 32000;
+  OCR1A = (16,000 * REFRESHCYCLE);
   TCCR1B |= (1 << WGM12);
-  // No Prescaller
-  TCCR1B |= (1 << CS10);
-  TIMSK1 |= (1 << OCIE1A);
- 
+  TCCR1B |= (1 << CS10);    // No Prescaller
+  TIMSK1 |= (1 << OCIE1A);  // Interrupt on compare match
   interrupts();
 
-  // Calculate number of rows based on address bits
-  maxrc = (1 << ADDRBITS);
-
-  // Analog pins settles quickly and I would keep getting same seed no matter what after a few seconds of power on.
   randomSeed(RANDOMSEED);
 
-  Serial.begin(115200);
-  Serial.setTimeout(2000);
+  Serial.begin(BAUDRATE);
+  Serial.setTimeout(1000);
   Serial.flush();
-  delay(4000); // Give 4s time to open serial monitor
+  delay(2000);
   while (!Serial) continue;
 }
 
 void loop() {
-  uint16_t col = 0;
-  uint16_t row = 0;
-  uint8_t colByte = 0;
-  char passStr[150];
-  char rowStr[200];
-  char failStr[150];
-  bool failed = false;
+  // put your main code here, to run repeatedly:
 
-  for (pass; pass < (PASSES+1); pass++) {
-    sprintf(passStr, "Starting Pass (%d/%d) AddrBits(%d) ROWS(%d) COLS(%d)----", pass, PASSES, ADDRBITS, maxrc, (maxrc / 8));
-    Serial.print(passStr);
-    if (DEBUG) Serial.println();
-    for (row = 0; row < maxrc; row++) {
-      if (DEBUG) sprintf(rowStr, "Wrt %03d: 0x", row);
-      for (colByte = 0; colByte < (maxrc / 8); colByte++) {
-        col = colByte*8;
-        fake[colByte] = (uint8_t)random(256);
-        writeByte(fake[colByte], row, col);
-        if (DEBUG) sprintf(rowStr + strlen(rowStr), "%02X", fake[colByte]);       
-      }
-
-      if (DEBUG) Serial.println(rowStr);
-
-      if (DEBUG) sprintf(rowStr, "Rrd %03d: 0x", row);
-      for (colByte = 0; colByte < (maxrc / 8); colByte++) {
-        col = colByte*8;
-        ram[colByte] = readByte(row, col);
-        
-        if (fake[colByte] != ram[colByte]) {
-          sprintf(failStr, "  *** Address(R:C)> %03X:%03X GOT[%02X] Expected[%02X]", row, col, ram[colByte], fake[colByte]);
-          Serial.println(failStr);
-          failed = true;
-          break;
-        } else {
-          if (DEBUG) sprintf(rowStr+strlen(rowStr), "%02X", ram[colByte]);
-        }
-      }
-
-      if (DEBUG) Serial.println(rowStr);
-      if (failed) break;
-    }
-
-    if (failed) {
-      sprintf(passStr, "FAILED at Row[%03X]", row);
-      Serial.println(passStr);
-    } else {
-      Serial.println(" SUCCESS");
-    }
-    failed = false;
-  }
 }
 
-
-// RAS only refresh cycle
 ISR(TIMER1_COMPA_vect) {
   noInterrupts();
   // Save Register state
-  uint8_t lsb = PORTA;
-  uint8_t msb = PORTC;
-  uint8_t ptl = PORTL;
+  uint8_t lsb = ADDRESS_LSB;
+  uint8_t msb = ADDRESS_MSB;
+  uint8_t ctl = CTRL_PORT;
   uint16_t row = 0;
 
-  for (row = 0; row < 512; row++) {
+  for (row; row < MAX_COLS; row++) {
     // Set row address
-    PORTA = (row & 0x00FF); // Grab the 8 LSB
-    PORTC = (row & 0x0100) >> 8; // 9th addr bit
+    ADDRESS_LSB = (row & 0x00FF);
+    ADDRESS_MSB = (row & 0xFF00) >> 8;
 
-    // Strobe row  
-    PORTL &= ~(1 << RAS); // RAS active
-    PORTL |= (1 << RAS);  // RAS inactive
+    // Strobe row
+    RAM_RAS_ACTIVE;
+    RAM_RAS_INACTIVE;
   }
 
-  // Restore register state
-  PORTA = lsb;
-  PORTC = msb;
-  PORTL = ptl;
+  ADDRESS_LSB = lsb;
+  ADDRESS_MSB = msb;
+  CTRL_PORT   = ctl;
   interrupts();
 }
